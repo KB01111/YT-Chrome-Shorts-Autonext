@@ -243,8 +243,18 @@ $("reset").addEventListener("click", () => {
 // Active-element guard: never clobber the text field the user is editing —
 // snapshot the focused text field's value before repaint, restore it after.
 chrome.storage.onChanged.addListener((chg, area) => {
-  if (area === "local" && chg.cfg?.newValue) {
-    const active = document.activeElement;
+  if (area !== "local" || !chg.cfg?.newValue) return;
+  const newV = chg.cfg.newValue, oldV = chg.cfg.oldValue || {};
+  // Enable/disable-only writes (hotkey toggle, disable-with-invalid-filters
+  // path) touch just the switch: skip the repaint so unsaved filter drafts
+  // in text fields are never clobbered.
+  let onlyOn = true;
+  for (const k of new Set([...Object.keys(newV), ...Object.keys(oldV)])) {
+    if (k === "on") continue;
+    if (JSON.stringify(newV[k]) !== JSON.stringify(oldV[k])) { onlyOn = false; break; }
+  }
+  if (onlyOn) { $("on").checked = !!newV.on; return; }
+  const active = document.activeElement;
     const editing = !!active && (active.tagName === "TEXTAREA" ||
       (active.tagName === "INPUT" && active.type !== "checkbox" && active.type !== "radio"));
     const activeId = editing ? active.id : null;
@@ -254,5 +264,4 @@ chrome.storage.onChanged.addListener((chg, area) => {
       const el = $(activeId);
       if (el) el.value = savedValue;
     }
-  }
 });
