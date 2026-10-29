@@ -24,18 +24,19 @@ function textToList(s) {
 }
 
 function parseCompact(t) {
-  // Local mirror of content.js: "12.3k"/"4m"/"1,234" -> number, NaN if not numeric.
+  // Strict input parser: "12.3k"/"4m"/"1,234" -> number, NaN if not numeric.
   if (t == null) return NaN;
   if (typeof t === "number") return t;
   let s = String(t).trim().toLowerCase().replace(/,/g, "");
   if (!s || s === "none") return NaN;
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?[kmb]?$/.test(s)) return NaN;
   let m = 1;
   const last = s.charCodeAt(s.length - 1);
   if (last === 107) { m = 1e3; s = s.slice(0, -1); }       // k
   else if (last === 109) { m = 1e6; s = s.slice(0, -1); }  // m
   else if (last === 98) { m = 1e9; s = s.slice(0, -1); }   // b
-  const n = parseFloat(s);
-  return Number.isFinite(n) ? n * m : NaN;
+  const n = Number(s) * m;
+  return Number.isFinite(n) ? n : NaN;
 }
 
 function isValidCombo(s) {
@@ -62,7 +63,7 @@ function clearMarks() {
   }
 }
 
-// Validates min>max pairs, marks offending fields red. Always saves anyway.
+// Validates min>max pairs and marks offending fields red.
 function validateRanges(cfg) {
   clearMarks();
   const bad = [];
@@ -164,6 +165,10 @@ function save(immediate) {
       }
     }
     const warn = [rangeWarn, keyWarn].filter(Boolean).join(" • ");
+    if (rangeWarn) {
+      setStatus(warn, true);
+      return;
+    }
     chrome.storage.local.set({ cfg }, () => {
       if (warn) {
         setStatus(warn, true);
@@ -196,9 +201,7 @@ document.querySelectorAll("input, select, textarea").forEach((el) => {
 // Flush a pending debounced write synchronously on fast close.
 window.addEventListener("pagehide", () => {
   if (saveTimer) {
-    clearTimeout(saveTimer);
-    saveTimer = 0;
-    chrome.storage.local.set({ cfg: readUI() });
+    save(true);
   }
 });
 

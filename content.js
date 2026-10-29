@@ -105,11 +105,9 @@ function getActiveRenderer() {
 
 function rendererKey(r) {
   if (!r) return null;
-  // Primary: pathname carries the short id (/shorts/<id>) and is stable
-  // across re-renders, unlike currentSrc which can be blank pre-hydration.
-  const p = location.pathname || "";
-  if (p.indexOf("/shorts/") === 0 && p.length > "/shorts/".length) return "path:" + p;
-  // Fallback: video src, only when pathname is generic ("/shorts" without id).
+  // Keep identity local: pathname can change before the active renderer does.
+  const videoId = r.getAttribute("video-id");
+  if (videoId) return "video:" + videoId;
   const v = r.querySelector("video");
   const src = v && v.currentSrc ? v.currentSrc : "";
   if (src) return "src:" + src;
@@ -271,9 +269,12 @@ function advance() {
   }
   // (c) Last resort: dispatch ArrowDown/ArrowUp so YT's own key handler moves.
   try {
+    const before = getActiveRenderer();
+    const beforeKey = rendererKey(before);
     const key = S.dir < 0 ? "ArrowUp" : "ArrowDown";
     document.dispatchEvent(new KeyboardEvent("keydown", { key: key, bubbles: true, cancelable: true }));
-    return true;
+    const after = getActiveRenderer();
+    return !!after && (after !== before || rendererKey(after) !== beforeKey);
   } catch (_) {}
   return false;
 }
@@ -358,8 +359,10 @@ function attachCurrent() {
   const r = getActiveRenderer();
   if (!r) return;
   const key = rendererKey(r);
-  if (key && key === curKey) {
+  const v = r.querySelector("video");
+  if (key && key === curKey && r === activeRenderer && v === curVideo) {
     // same short: just enforce no-loop + resume if YT paused it
+    unloop(v);
     if (curVideo && curVideo.paused && !curVideo.ended && !userPaused) {
       curVideo.play().catch(() => {});
     }
@@ -369,7 +372,6 @@ function attachCurrent() {
   userPaused = false; // new short: clear any manual-pause state
   activeRenderer = r;
   playCount = 0;
-  const v = r.querySelector("video");
   curVideo = v || null;
   if (!v) {
     // video not hydrated yet: observer will re-fire when it appears; one short retry
@@ -510,7 +512,7 @@ function boot() {
   document.addEventListener("ended", onEnded, true);
   document.addEventListener(
     "play",
-    (e) => { if (e.target && e.target.tagName === "VIDEO") unloop(e.target); },
+    (e) => { if (S.on && e.target && e.target.tagName === "VIDEO") unloop(e.target); },
     true
   );
   // Respect explicit user pauses: do not autoplay over them.
@@ -569,6 +571,7 @@ function boot() {
   // (relayed by background.js). In-page keydown below covers the focused-page case.
   if (chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((msg) => {
+      if (!isShortsPage()) return;
       if (msg?.type === "toggle-autonext") setCfg({ on: !S.on });
       else if (msg?.type === "like-toggle") toggleLike();
     });
