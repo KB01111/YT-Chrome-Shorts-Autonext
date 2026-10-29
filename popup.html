@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Shorts AutoNext</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { width: 300px; margin: 0; padding: 12px 14px 14px; font: 13px/1.45 system-ui, sans-serif; }
+  h1 { font-size: 14px; margin: 0 0 8px; display: flex; align-items: center; gap: 8px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 7px 0; }
+  label { flex: 1; }
+  input[type="text"], input[type="number"], select, textarea {
+    width: 130px; padding: 3px 6px; font: inherit; border: 1px solid #8885; border-radius: 6px;
+  }
+  textarea { width: 100%; min-height: 34px; resize: vertical; font-size: 12px; }
+  fieldset { border: 1px solid #8884; border-radius: 8px; margin: 10px 0; padding: 8px 10px; }
+  legend { font-weight: 600; font-size: 12px; padding: 0 4px; }
+  .grid { display: grid; grid-template-columns: 1fr 62px 62px; gap: 4px 6px; align-items: center; }
+  .grid input { width: 100%; }
+  .hint { color: #888; font-size: 11px; }
+  .switch { position: relative; width: 38px; height: 22px; flex: none; }
+  .switch input { opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+  .track { position: absolute; inset: 0; background: #8886; border-radius: 11px; pointer-events: none; transition: background .15s; }
+  .track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: left .15s; box-shadow: 0 1px 3px #0005; }
+  .switch input:checked + .track { background: #1a73e8; }
+  .switch input:checked + .track::after { left: 18px; }
+  #status { font-size: 12px; color: #1a73e8; min-height: 16px; margin-top: 6px; }
+</style>
+</head>
+<body>
+  <h1>
+    <span>▶ Shorts AutoNext</span>
+    <span class="switch" style="margin-left:auto">
+      <input type="checkbox" id="on" aria-label="Enable auto-next">
+      <span class="track"></span>
+    </span>
+  </h1>
+
+  <div class="row">
+    <label for="dir">Scroll direction</label>
+    <select id="dir"><option value="1">Down ⬇</option><option value="-1">Up ⬆</option></select>
+  </div>
+  <div class="row">
+    <label for="plays" title="Play each Short this many times before advancing">Plays per Short</label>
+    <input type="number" id="plays" min="1" max="10" step="1">
+  </div>
+  <div class="row">
+    <label for="delay" title="Extra wait after a Short ends, in ms">Extra delay (ms)</label>
+    <input type="number" id="delay" min="0" max="10000" step="250">
+  </div>
+  <div class="row">
+    <label for="waitForComments" title="Hold while the comments panel is open">Wait while comments open</label>
+    <input type="checkbox" id="waitForComments">
+  </div>
+
+  <fieldset>
+    <legend>Filters — skip Shorts outside these</legend>
+    <div class="grid">
+      <span></span><span class="hint">min</span><span class="hint">max</span>
+      <span>Length (s)</span>
+      <select id="minLen"></select><select id="maxLen"></select>
+      <span>Views</span>
+      <input type="text" id="minViews" placeholder="none" inputmode="decimal">
+      <input type="text" id="maxViews" placeholder="none" inputmode="decimal">
+      <span>Likes</span>
+      <input type="text" id="minLikes" placeholder="none" inputmode="decimal">
+      <input type="text" id="maxLikes" placeholder="none" inputmode="decimal">
+      <span>Comments</span>
+      <input type="text" id="minComments" placeholder="none" inputmode="decimal">
+      <input type="text" id="maxComments" placeholder="none" inputmode="decimal">
+    </div>
+    <p class="hint">Numbers accept k/m/b suffixes, e.g. 10k. Empty = no limit.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Creators &amp; tags</legend>
+    <label class="hint" for="blockAuthors">Blocked creators (comma-separated)</label>
+    <textarea id="blockAuthors" placeholder="@somechannel, other"></textarea>
+    <label class="hint" for="allowAuthors">Always allow (comma-separated)</label>
+    <textarea id="allowAuthors" placeholder="@favorite"></textarea>
+    <label class="hint" for="blockTags">Blocked tags (comma-separated)</label>
+    <textarea id="blockTags" placeholder="#nsfw, #spoiler"></textarea>
+    <div class="row"><label for="skipNoTags">Skip Shorts with no tags</label><input type="checkbox" id="skipNoTags"></div>
+    <div class="row"><label for="allowSubs" title="Never skip channels you're subscribed to">Always allow subscriptions</label><input type="checkbox" id="allowSubs"></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Shortcuts</legend>
+    <div class="row"><label for="toggleKey">Toggle on/off</label><input type="text" id="toggleKey" placeholder="shift+d"></div>
+    <div class="row"><label for="likeKey">Like current</label><input type="text" id="likeKey" placeholder="shift+g"></div>
+    <p class="hint">Format: shift+d. Global ones can be changed at chrome://extensions/shortcuts.</p>
+  </fieldset>
+
+  <div id="status" role="status"></div>
+  <script src="popup.js"></script>
+</body>
+</html>
