@@ -40,7 +40,7 @@ function parseCompact(t) {
 }
 
 function isValidCombo(s) {
-  return /^(shift\+|ctrl\+|alt\+|meta\+)*[a-z0-9]$/i.test(String(s || "").trim());
+  return /^(shift\+|ctrl\+|alt\+|meta\+)*([a-z0-9]|f\d{1,2}|arrow(up|down|left|right)|space|enter|escape|tab|[\/\-\=\[\]\\;',\.])$/i.test(String(s || "").trim());
 }
 
 function validKey(raw, fb) {
@@ -63,13 +63,22 @@ function clearMarks() {
   }
 }
 
-// Validates min>max pairs and marks offending fields red.
+// Validates min>max pairs and malformed numbers, marks offending fields red.
 function validateRanges(cfg) {
   clearMarks();
   const bad = [];
+  const invalid = [];
   if (cfg.minLen !== "none" && cfg.maxLen !== "none") {
     const a = parseInt(cfg.minLen, 10), b = parseInt(cfg.maxLen, 10);
     if (Number.isFinite(a) && Number.isFinite(b) && a > b) bad.push(["minLen", "maxLen", "length"]);
+  }
+  for (const [field, label] of [["minViews", "views"], ["maxViews", "views"],
+                                ["minLikes", "likes"], ["maxLikes", "likes"],
+                                ["minComments", "comments"], ["maxComments", "comments"]]) {
+    if (cfg[field] !== "none" && Number.isNaN(parseCompact(cfg[field]))) {
+      $(field).style.borderColor = "red";
+      invalid.push([field, label]);
+    }
   }
   for (const [lo, hi, label] of [["minViews", "maxViews", "views"],
                                  ["minLikes", "maxLikes", "likes"],
@@ -80,6 +89,7 @@ function validateRanges(cfg) {
     }
   }
   for (const [lo, hi] of bad) { $(lo).style.borderColor = "red"; $(hi).style.borderColor = "red"; }
+  if (invalid.length) return `Invalid ${invalid[0][1]} number — check filters`;
   if (!bad.length) return "";
   return bad[0][2] === "length"
     ? "Min length > max — check filters"
@@ -162,6 +172,11 @@ function save(immediate) {
       if (raw && !isValidCombo(raw)) {
         $(id).style.borderColor = "red";
         keyWarn = "Invalid shortcut, use e.g. shift+d";
+      }
+      if (/shift\+.*\d/i.test(raw)) {
+        $(id).style.borderColor = "red";
+        const shiftWarn = "Shift+digit never matches (browser reports !, use another key)";
+        keyWarn = keyWarn ? keyWarn + " • " + shiftWarn : shiftWarn;
       }
     }
     const warn = [rangeWarn, keyWarn].filter(Boolean).join(" • ");

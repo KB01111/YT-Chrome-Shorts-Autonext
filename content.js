@@ -39,6 +39,7 @@ let mo = null; // renderer-swap observer
 let commentsMo = null; // one-shot comments-close observer
 let scheduled = 0;
 let userPaused = false; // true when the user manually paused the current short
+let lastGesture = 0; // timestamp of last user gesture (pointer/key); gates userPaused
 
 /* Cached thresholds/sets: rebuilt via rebuildCache() after boot-load and
  * on every storage change, so shouldSkip() avoids parseCompact()/new Set()
@@ -68,17 +69,20 @@ function rebuildCache() {
 
 function parseCompact(t) {
   // "12.3k" / "4m" / "1,234" -> number. ~10x cheaper than regex-heavy variants.
+  // Strict: invalid formats ("12x", "5oops") yield NaN (fail-open in shouldSkip);
+  // only null/undefined/empty yield 0. Same strictness as popup.js.
   if (t == null) return 0;
   if (typeof t === "number") return t;
   let s = String(t).trim().toLowerCase().replace(/,/g, "");
   if (!s) return 0;
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?[kmb]?$/.test(s)) return NaN;
   let m = 1;
   const last = s.charCodeAt(s.length - 1);
   if (last === 107) { m = 1e3; s = s.slice(0, -1); }       // k
   else if (last === 109) { m = 1e6; s = s.slice(0, -1); }  // m
   else if (last === 98) { m = 1e9; s = s.slice(0, -1); }    // b
-  const n = parseFloat(s);
-  return Number.isFinite(n) ? n * m : 0;
+  const n = Number(s) * m;
+  return Number.isFinite(n) ? n : NaN;
 }
 
 function normName(t) {
@@ -206,12 +210,11 @@ function shouldSkip(r, video) {
     }
   }
 
-  // Views / likes / comments — scoped to the renderer first so a sibling
-  // renderer's factoids are never read; document query is only a fallback.
+  // Views / likes / comments — strictly scoped to the active renderer.
+  // Sibling-renderer factoids must never be used: fail-open (no filter applies
+  // for a metric the renderer lacks) instead of filtering on a sibling's count.
   if (S.minViews !== "none" || S.maxViews !== "none") {
     const el = r.querySelector(
-      "#factoids view-count-factoid-renderer span, #factoids span.ytwFactoidRendererValue"
-    ) || document.querySelector(
       "#factoids view-count-factoid-renderer span, #factoids span.ytwFactoidRendererValue"
     );
     if (el) {
@@ -223,8 +226,6 @@ function shouldSkip(r, video) {
   if (S.minLikes !== "none" || S.maxLikes !== "none") {
     const el = r.querySelector(
       "#factoids factoid-renderer span.ytwFactoidRendererValue span, #factoids factoid-renderer span"
-    ) || document.querySelector(
-      "#factoids factoid-renderer span.ytwFactoidRendererValue span, #factoids factoid-renderer span"
     );
     if (el) {
       const n = parseCompact(el.textContent);
@@ -233,9 +234,13 @@ function shouldSkip(r, video) {
     }
   }
   if (S.minComments !== "none" || S.maxComments !== "none") {
-    const el =
-      r.querySelector("reel-action-bar-view-model button-view-model span") ||
-      document.querySelector("#comments-button span");
+    let el = r.querySelector("reel-action-bar-view-model button-view-model span");
+    if (!el) {
+      const fb = document.querySelector("#comments-button span");
+      // Sibling factoids must never be used: accept the document fallback
+      // only when it lives inside this renderer; otherwise ignore (fail-open).
+      if (fb && r.contains(fb)) el = fb;
+    }
     if (el) {
       const n = parseCompact(el.textContent);
       if (!Number.isNaN(C.numMinComments) && n < C.numMinComments) return true;
@@ -288,16 +293,17 @@ function waitCommentsClosed(token) {
     commentsMo = new MutationObserver(() => {
       if (token !== navToken) {
         if (iv) clearInterval(iv);
-        if (commentsMo) { commentsMo.disconnect(); commentsMo = null; }
+        if (commentsMo === myMo) { commentsMo.disconnect(); commentsMo = null; }
         resolve(false);
         return;
       }
       if (!commentsOpen()) {
         if (iv) clearInterval(iv);
-        if (commentsMo) { commentsMo.disconnect(); commentsMo = null; }
+        if (commentsMo === myMo) { commentsMo.disconnect(); commentsMo = null; }
         resolve(true);
       }
     });
+    const myMo = commentsMo;
     const panel = document.querySelector("ytd-engagement-panel-section-list-renderer");
     commentsMo.observe(panel || document.body, {
       attributes: true, attributeFilter: ["visibility", "panel-content-visible"],
@@ -307,12 +313,12 @@ function waitCommentsClosed(token) {
     iv = setInterval(() => {
       if (token !== navToken) {
         clearInterval(iv);
-        if (commentsMo) { commentsMo.disconnect(); commentsMo = null; }
+        if (commentsMo === myMo) { commentsMo.disconnect(); commentsMo = null; }
         resolve(false);
       }
       else if (!commentsOpen()) {
         clearInterval(iv);
-        if (commentsMo) { commentsMo.disconnect(); commentsMo = null; }
+        if (commentsMo === myMo) { commentsMo.disconnect(); commentsMo = null; }
         resolve(true);
       }
     }, 1000);
@@ -515,11 +521,14 @@ function boot() {
     (e) => { if (S.on && e.target && e.target.tagName === "VIDEO") unloop(e.target); },
     true
   );
+  // Fresh user gestures gate userPaused: ignores programmatic pauses.
+  document.addEventListener("pointerdown", () => { lastGesture = Date.now(); }, true);
+  document.addEventListener("keydown", () => { lastGesture = Date.now(); }, true);
   // Respect explicit user pauses: do not autoplay over them.
   document.addEventListener(
     "pause",
     (e) => {
-      if (e.target === curVideo && !e.target.ended && document.hasFocus()) {
+      if (e.target === curVideo && !e.target.ended && (Date.now() - lastGesture < 5000)) {
         userPaused = true;
       }
     },
