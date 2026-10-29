@@ -466,7 +466,8 @@ function matchKey(e, combo) {
   // combo like "shift+d": exact modifier match, no per-keypress debounce/timeout.
   if (!combo) return false;
   const parts = combo.toLowerCase().split("+");
-  const key = parts.pop();
+  const name = parts.pop();
+  const key = name === "space" ? " " : name;
   if ((e.key || "").toLowerCase() !== key) return false;
   const want = { shift: false, ctrl: false, alt: false, meta: false };
   for (const p of parts) if (p in want) want[p] = true;

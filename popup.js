@@ -43,10 +43,14 @@ function isValidCombo(s) {
   return /^(shift\+|ctrl\+|alt\+|meta\+)*([a-z0-9]|f\d{1,2}|arrow(up|down|left|right)|space|enter|escape|tab|[\/\-\=\[\]\\;',\.])$/i.test(String(s || "").trim());
 }
 
+function isShiftDigitCombo(s) {
+  return /(?:^|\+)shift\+(?:.*\+)?\d$/i.test(s);
+}
+
 function validKey(raw, fb) {
   const v = String(raw || "").trim().toLowerCase();
   if (!v) return fb;
-  return isValidCombo(v) ? v : fb;
+  return isValidCombo(v) && !isShiftDigitCombo(v) ? v : fb;
 }
 
 function setStatus(msg, isErr) {
@@ -75,7 +79,8 @@ function validateRanges(cfg) {
   for (const [field, label] of [["minViews", "views"], ["maxViews", "views"],
                                 ["minLikes", "likes"], ["maxLikes", "likes"],
                                 ["minComments", "comments"], ["maxComments", "comments"]]) {
-    if (cfg[field] !== "none" && Number.isNaN(parseCompact(cfg[field]))) {
+    const n = parseCompact(cfg[field]);
+    if (cfg[field] !== "none" && (Number.isNaN(n) || n < 0)) {
       $(field).style.borderColor = "red";
       invalid.push([field, label]);
     }
@@ -173,7 +178,7 @@ function save(immediate) {
         $(id).style.borderColor = "red";
         keyWarn = "Invalid shortcut, use e.g. shift+d";
       }
-      if (/shift\+.*\d/i.test(raw)) {
+      if (isShiftDigitCombo(raw)) {
         $(id).style.borderColor = "red";
         const shiftWarn = "Shift+digit never matches (browser reports !, use another key)";
         keyWarn = keyWarn ? keyWarn + " • " + shiftWarn : shiftWarn;
@@ -182,6 +187,12 @@ function save(immediate) {
     const warn = [rangeWarn, keyWarn].filter(Boolean).join(" • ");
     if (rangeWarn) {
       setStatus(warn, true);
+      if (!cfg.on) {
+        // Disabling must work even while filter edits are invalid.
+        chrome.storage.local.get("cfg", (res) => {
+          chrome.storage.local.set({ cfg: { ...DEFAULTS, ...(res && res.cfg), on: false } });
+        });
+      }
       return;
     }
     chrome.storage.local.set({ cfg }, () => {
