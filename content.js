@@ -4,7 +4,9 @@
  */
 "use strict";
 
-const DEFAULTS = {
+const DEFAULTS = (typeof SHORTS_AUTONEXT_DEFAULTS !== "undefined")
+  ? SHORTS_AUTONEXT_DEFAULTS
+  : {
   on: true,
   dir: 1, // 1 = down/next, -1 = up/prev
   plays: 1, // replays before advancing
@@ -36,22 +38,51 @@ let activeRenderer = null;
 let mo = null; // renderer-swap observer
 let commentsMo = null; // one-shot comments-close observer
 let scheduled = 0;
+let userPaused = false; // true when the user manually paused the current short
+let lastGesture = 0; // timestamp of last user gesture (pointer/key); gates userPaused
+
+/* Cached thresholds/sets: rebuilt via rebuildCache() after boot-load and
+ * on every storage change, so shouldSkip() avoids parseCompact()/new Set()
+ * work on each check. */
+let C = {
+  numMinViews: NaN, numMaxViews: NaN,
+  numMinLikes: NaN, numMaxLikes: NaN,
+  numMinComments: NaN, numMaxComments: NaN,
+  blockTagsNorm: new Set(),
+  blockAuthorsNorm: new Set(),
+  allowAuthorsNorm: new Set(),
+};
+
+function rebuildCache() {
+  C.numMinViews = S.minViews !== "none" ? parseCompact(S.minViews) : NaN;
+  C.numMaxViews = S.maxViews !== "none" ? parseCompact(S.maxViews) : NaN;
+  C.numMinLikes = S.minLikes !== "none" ? parseCompact(S.minLikes) : NaN;
+  C.numMaxLikes = S.maxLikes !== "none" ? parseCompact(S.maxLikes) : NaN;
+  C.numMinComments = S.minComments !== "none" ? parseCompact(S.minComments) : NaN;
+  C.numMaxComments = S.maxComments !== "none" ? parseCompact(S.maxComments) : NaN;
+  C.blockTagsNorm = new Set((S.blockTags || []).map(normName));
+  C.blockAuthorsNorm = new Set((S.blockAuthors || []).map(normName));
+  C.allowAuthorsNorm = new Set((S.allowAuthors || []).map(normName));
+}
 
 /* ---------- tiny utils (hot-path friendly) ---------- */
 
 function parseCompact(t) {
   // "12.3k" / "4m" / "1,234" -> number. ~10x cheaper than regex-heavy variants.
+  // Strict: invalid formats ("12x", "5oops") yield NaN (fail-open in shouldSkip);
+  // only null/undefined/empty yield 0. Same strictness as popup.js.
   if (t == null) return 0;
   if (typeof t === "number") return t;
   let s = String(t).trim().toLowerCase().replace(/,/g, "");
   if (!s) return 0;
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?[kmb]?$/.test(s)) return NaN;
   let m = 1;
   const last = s.charCodeAt(s.length - 1);
   if (last === 107) { m = 1e3; s = s.slice(0, -1); }       // k
   else if (last === 109) { m = 1e6; s = s.slice(0, -1); }  // m
   else if (last === 98) { m = 1e9; s = s.slice(0, -1); }    // b
-  const n = parseFloat(s);
-  return Number.isFinite(n) ? n * m : 0;
+  const n = Number(s) * m;
+  return Number.isFinite(n) ? n : NaN;
 }
 
 function normName(t) {
@@ -78,10 +109,19 @@ function getActiveRenderer() {
 
 function rendererKey(r) {
   if (!r) return null;
+  // Keep identity local: pathname can change before the active renderer does.
+  const videoId = r.getAttribute("video-id");
+  if (videoId) return "video:" + videoId;
   const v = r.querySelector("video");
-  // currentSrc is stable per short and cheap to read; fallback to element id/index
   const src = v && v.currentSrc ? v.currentSrc : "";
-  if (src) return src;
+  if (src) return "src:" + src;
+  // Last resort: renderer index among siblings; null if that is unavailable.
+  if (r.parentNode && r.parentNode.children) {
+    const sibs = r.parentNode.children;
+    for (let i = 0; i < sibs.length; i++) {
+      if (sibs[i] === r) return "idx:" + i;
+    }
+  }
   return r.id ? "id:" + r.id : null;
 }
 
@@ -135,24 +175,18 @@ function shouldSkip(r, video) {
   if (!filtersEnabled()) return false;
 
   // Creator (needed by allow/block/subs logic) — single query.
-  let creator = null, creatorNorm = "";
+  // NOTE: allowAuthors/allowSubs bypass ONLY the blockAuthors check below;
+  // length/views/likes/tags filters still apply to allowed/subscribed shorts.
+  let authorAllowed = false;
   if (S.blockAuthors.length || S.allowAuthors.length || S.allowSubs) {
-    creator =
+    const creator =
       r.querySelector("yt-reel-channel-bar-view-model a") ||
       r.querySelector("ytd-channel-name a");
-    creatorNorm = creator ? normName(creator.textContent) : "";
+    const creatorNorm = creator ? normName(creator.textContent) : "";
     if (creatorNorm) {
-      if (S.allowAuthors.length) {
-        for (let i = 0; i < S.allowAuthors.length; i++) {
-          if (normName(S.allowAuthors[i]) === creatorNorm) return false; // whitelisted: keep
-        }
-      }
-      if (S.allowSubs && isSubscribed(r)) return false; // subscribed: keep
-      if (S.blockAuthors.length) {
-        for (let i = 0; i < S.blockAuthors.length; i++) {
-          if (normName(S.blockAuthors[i]) === creatorNorm) return true;
-        }
-      }
+      if (C.allowAuthorsNorm.has(creatorNorm)) authorAllowed = true;
+      else if (S.allowSubs && isSubscribed(r)) authorAllowed = true;
+      if (!authorAllowed && C.blockAuthorsNorm.has(creatorNorm)) return true;
     }
   }
 
@@ -169,43 +203,48 @@ function shouldSkip(r, video) {
     if (tags.length === 0) {
       if (S.skipNoTags) return true;
     } else if (S.blockTags.length) {
-      const blocked = new Set(S.blockTags.map(normName));
       for (let i = 0; i < tags.length; i++) {
         const t = normName(tags[i].textContent).replace(/^#/, "");
-        if (blocked.has(t) || blocked.has("#" + t)) return true;
+        if (C.blockTagsNorm.has(t) || C.blockTagsNorm.has("#" + t)) return true;
       }
     }
   }
 
-  // Views / likes / comments — each queried only if its filter is active.
+  // Views / likes / comments — strictly scoped to the active renderer.
+  // Sibling-renderer factoids must never be used: fail-open (no filter applies
+  // for a metric the renderer lacks) instead of filtering on a sibling's count.
   if (S.minViews !== "none" || S.maxViews !== "none") {
-    const el = document.querySelector(
+    const el = r.querySelector(
       "#factoids view-count-factoid-renderer span, #factoids span.ytwFactoidRendererValue"
     );
     if (el) {
       const n = parseCompact(el.textContent);
-      if (S.minViews !== "none" && n < parseCompact(S.minViews)) return true;
-      if (S.maxViews !== "none" && n > parseCompact(S.maxViews)) return true;
+      if (!Number.isNaN(C.numMinViews) && n < C.numMinViews) return true;
+      if (!Number.isNaN(C.numMaxViews) && n > C.numMaxViews) return true;
     }
   }
   if (S.minLikes !== "none" || S.maxLikes !== "none") {
-    const el = document.querySelector(
+    const el = r.querySelector(
       "#factoids factoid-renderer span.ytwFactoidRendererValue span, #factoids factoid-renderer span"
     );
     if (el) {
       const n = parseCompact(el.textContent);
-      if (S.minLikes !== "none" && n < parseCompact(S.minLikes)) return true;
-      if (S.maxLikes !== "none" && n > parseCompact(S.maxLikes)) return true;
+      if (!Number.isNaN(C.numMinLikes) && n < C.numMinLikes) return true;
+      if (!Number.isNaN(C.numMaxLikes) && n > C.numMaxLikes) return true;
     }
   }
   if (S.minComments !== "none" || S.maxComments !== "none") {
-    const el =
-      r.querySelector("reel-action-bar-view-model button-view-model span") ||
-      document.querySelector("#comments-button span");
+    let el = r.querySelector("reel-action-bar-view-model button-view-model span");
+    if (!el) {
+      const fb = document.querySelector("#comments-button span");
+      // Sibling factoids must never be used: accept the document fallback
+      // only when it lives inside this renderer; otherwise ignore (fail-open).
+      if (fb && r.contains(fb)) el = fb;
+    }
     if (el) {
       const n = parseCompact(el.textContent);
-      if (S.minComments !== "none" && n < parseCompact(S.minComments)) return true;
-      if (S.maxComments !== "none" && n > parseCompact(S.maxComments)) return true;
+      if (!Number.isNaN(C.numMinComments) && n < C.numMinComments) return true;
+      if (!Number.isNaN(C.numMaxComments) && n > C.numMaxComments) return true;
     }
   }
   return false;
@@ -214,7 +253,7 @@ function shouldSkip(r, video) {
 /* ---------- navigation ---------- */
 
 function advance() {
-  // Prefer YT's own nav buttons: triggers proper hydration, no scroll hacks.
+  // (a) Prefer YT's own nav buttons: triggers proper hydration, no scroll hacks.
   const sel = S.dir < 0
     ? "#navigation-button-up button"
     : "#navigation-button-down button";
@@ -223,14 +262,25 @@ function advance() {
     btn.click();
     return true;
   }
-  // Fallback: scroll sibling into view.
+  // (b) Fallback: scroll sibling into view.
   if (activeRenderer) {
     const sib = S.dir < 0 ? activeRenderer.previousElementSibling : activeRenderer.nextElementSibling;
     if (sib && sib.scrollIntoView) {
-      sib.scrollIntoView({ block: "nearest" });
-      return true;
+      try {
+        sib.scrollIntoView({ block: "nearest" });
+        return true;
+      } catch (_) {}
     }
   }
+  // (c) Last resort: dispatch ArrowDown/ArrowUp so YT's own key handler moves.
+  try {
+    const before = getActiveRenderer();
+    const beforeKey = rendererKey(before);
+    const key = S.dir < 0 ? "ArrowUp" : "ArrowDown";
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: key, bubbles: true, cancelable: true }));
+    const after = getActiveRenderer();
+    return !!after && (after !== before || rendererKey(after) !== beforeKey);
+  } catch (_) {}
   return false;
 }
 
@@ -238,20 +288,39 @@ function waitCommentsClosed(token) {
   // Resolves when comments close; rejects (false) if short changes meanwhile.
   return new Promise((resolve) => {
     if (!commentsOpen()) return resolve(true);
-    if (commentsMo) commentsMo.disconnect();
+    if (commentsMo) { commentsMo.disconnect(); commentsMo = null; }
+    let iv = 0;
     commentsMo = new MutationObserver(() => {
-      if (token !== navToken) { commentsMo.disconnect(); resolve(false); return; }
-      if (!commentsOpen()) { commentsMo.disconnect(); commentsMo = null; resolve(true); }
+      if (token !== navToken) {
+        if (iv) clearInterval(iv);
+        if (commentsMo === myMo) { commentsMo.disconnect(); commentsMo = null; }
+        resolve(false);
+        return;
+      }
+      if (!commentsOpen()) {
+        if (iv) clearInterval(iv);
+        if (commentsMo === myMo) { commentsMo.disconnect(); commentsMo = null; }
+        resolve(true);
+      }
     });
+    const myMo = commentsMo;
     const panel = document.querySelector("ytd-engagement-panel-section-list-renderer");
     commentsMo.observe(panel || document.body, {
       attributes: true, attributeFilter: ["visibility", "panel-content-visible"],
       subtree: true, childList: true,
     });
     // Safety: re-check once per second instead of busy 100ms loop.
-    const iv = setInterval(() => {
-      if (token !== navToken) { clearInterval(iv); resolve(false); }
-      else if (!commentsOpen()) { clearInterval(iv); if (commentsMo) commentsMo.disconnect(); commentsMo = null; resolve(true); }
+    iv = setInterval(() => {
+      if (token !== navToken) {
+        clearInterval(iv);
+        if (commentsMo === myMo) { commentsMo.disconnect(); commentsMo = null; }
+        resolve(false);
+      }
+      else if (!commentsOpen()) {
+        clearInterval(iv);
+        if (commentsMo === myMo) { commentsMo.disconnect(); commentsMo = null; }
+        resolve(true);
+      }
     }, 1000);
   });
 }
@@ -296,17 +365,19 @@ function attachCurrent() {
   const r = getActiveRenderer();
   if (!r) return;
   const key = rendererKey(r);
-  if (key && key === curKey) {
+  const v = r.querySelector("video");
+  if (key && key === curKey && r === activeRenderer && v === curVideo) {
     // same short: just enforce no-loop + resume if YT paused it
-    if (curVideo && curVideo.paused && !curVideo.ended) {
+    unloop(v);
+    if (curVideo && curVideo.paused && !curVideo.ended && !userPaused) {
       curVideo.play().catch(() => {});
     }
     return;
   }
   curKey = key;
+  userPaused = false; // new short: clear any manual-pause state
   activeRenderer = r;
   playCount = 0;
-  const v = r.querySelector("video");
   curVideo = v || null;
   if (!v) {
     // video not hydrated yet: observer will re-fire when it appears; one short retry
@@ -314,7 +385,7 @@ function attachCurrent() {
     return;
   }
   unloop(v);
-  v.play().catch(() => {});
+  if (!userPaused) v.play().catch(() => {});
   // Skip disallowed shorts shortly after metadata hydrates (bounded, not 15x500ms).
   if (filtersEnabled()) {
     let tries = 0;
@@ -344,12 +415,13 @@ function onEnded(e) {
     if (r !== ar) return;
     activeRenderer = ar;
   }
-  e.preventDefault && e.preventDefault();
+  // NOTE: "ended" is not cancelable, so no preventDefault() here.
   playCount++;
   if (playCount >= Math.max(1, S.plays | 0)) {
     playCount = 0;
     scheduleNext(false);
   } else {
+    userPaused = false; // ended is not a manual pause: allow replay
     v.play().catch(() => {});
   }
 }
@@ -394,7 +466,8 @@ function matchKey(e, combo) {
   // combo like "shift+d": exact modifier match, no per-keypress debounce/timeout.
   if (!combo) return false;
   const parts = combo.toLowerCase().split("+");
-  const key = parts.pop();
+  const name = parts.pop();
+  const key = name === "space" ? " " : name;
   if ((e.key || "").toLowerCase() !== key) return false;
   const want = { shift: false, ctrl: false, alt: false, meta: false };
   for (const p of parts) if (p in want) want[p] = true;
@@ -420,6 +493,7 @@ function toggleLike() {
 function boot() {
   chrome.storage.local.get("cfg", (res) => {
     if (res && res.cfg) S = { ...DEFAULTS, ...res.cfg };
+    rebuildCache();
     if (!isShortsPage()) return; // stay dormant off-shorts: zero cost
     observeRendererSwaps();
     attachCurrent();
@@ -429,12 +503,15 @@ function boot() {
     if (area !== "local" || !chg.cfg) return;
     const wasOn = S.on;
     S = { ...DEFAULTS, ...chg.cfg.newValue };
+    rebuildCache();
     if (S.on && !wasOn) { navToken++; attachCurrent(); }
     else if (!S.on && wasOn) {
       navToken++; // cancel pending navs
-      if (scheduled) clearTimeout(scheduled);
+      if (scheduled) { clearTimeout(scheduled); scheduled = 0; }
       if (commentsMo) { commentsMo.disconnect(); commentsMo = null; }
-      if (curVideo) unloop(curVideo); // restore loop attr? leave off: harmless
+      if (curVideo) {
+        try { curVideo.loop = true; } catch (_) {}
+      }
     }
   });
 
@@ -442,23 +519,48 @@ function boot() {
   document.addEventListener("ended", onEnded, true);
   document.addEventListener(
     "play",
-    (e) => { if (e.target && e.target.tagName === "VIDEO") unloop(e.target); },
+    (e) => { if (S.on && e.target && e.target.tagName === "VIDEO") unloop(e.target); },
+    true
+  );
+  // Fresh user gestures gate userPaused: ignores programmatic pauses.
+  document.addEventListener("pointerdown", () => { lastGesture = Date.now(); }, true);
+  document.addEventListener("keydown", () => { lastGesture = Date.now(); }, true);
+  // Respect explicit user pauses: do not autoplay over them.
+  document.addEventListener(
+    "pause",
+    (e) => {
+      if (e.target === curVideo && !e.target.ended && (Date.now() - lastGesture < 5000)) {
+        userPaused = true;
+      }
+    },
     true
   );
 
   // SPA navigation: YT fires yt-navigate-finish; popstate covers back/forward.
+  // Abort pending navs early on navigate-start.
+  window.addEventListener("yt-navigate-start", () => {
+    navToken++;
+    if (scheduled) { clearTimeout(scheduled); scheduled = 0; }
+  });
   window.addEventListener("yt-navigate-finish", () => {
     navToken++;
+    if (scheduled) { clearTimeout(scheduled); scheduled = 0; }
     curKey = null;
     if (S.on && isShortsPage()) {
       observeRendererSwaps();
       attachCurrent();
+    } else if (!isShortsPage()) {
+      if (mo) { mo.disconnect(); mo = null; }
     }
   });
   window.addEventListener("popstate", () => {
     navToken++;
+    if (scheduled) { clearTimeout(scheduled); scheduled = 0; }
     curKey = null;
     if (S.on && isShortsPage()) attachCurrent();
+    else if (!isShortsPage()) {
+      if (mo) { mo.disconnect(); mo = null; }
+    }
   });
 
   // In-page shortcuts (commands API handles it when focus is outside page).
@@ -479,6 +581,7 @@ function boot() {
   // (relayed by background.js). In-page keydown below covers the focused-page case.
   if (chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((msg) => {
+      if (!isShortsPage()) return;
       if (msg?.type === "toggle-autonext") setCfg({ on: !S.on });
       else if (msg?.type === "like-toggle") toggleLike();
     });
@@ -487,6 +590,7 @@ function boot() {
 
 function setCfg(patch) {
   S = { ...S, ...patch };
+  rebuildCache();
   chrome.storage.local.set({ cfg: S });
 }
 

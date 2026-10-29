@@ -35,7 +35,32 @@ rebuilt for minimal CPU / memory overhead.
 ## Files
 
 - `manifest.json` — MV3, `storage` permission only
+- `config.js` — shared `SHORTS_AUTONEXT_DEFAULTS` (single source of truth)
 - `content.js` — event-driven core (no build step)
 - `popup.html` / `popup.js` — settings UI
 - `background.js` — keyboard-command relay, sleeps otherwise
 - `icons/` — extension icons
+
+## Shared defaults (`config.js`)
+
+Single source of truth: `var SHORTS_AUTONEXT_DEFAULTS = {...}` in `config.js`.
+`content.js` / `popup.js` keep their inline `DEFAULTS` as fallback and should
+prefer the shared object when present:
+
+```js
+const DEFAULTS = (typeof SHORTS_AUTONEXT_DEFAULTS !== "undefined")
+  ? SHORTS_AUTONEXT_DEFAULTS
+  : { /* inline fallback */ };
+```
+
+Inclusion order matters (plain `var`, no modules):
+
+- `manifest.json` content_scripts already loads `["config.js", "content.js"]` —
+  `config.js` first.
+- `popup.html` is owned separately and was intentionally not touched here.
+  Its owner should add, **before** `popup.js`:
+
+```html
+<script src="config.js"></script>
+<script src="popup.js"></script>
+```
